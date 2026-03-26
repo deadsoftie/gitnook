@@ -87,13 +87,16 @@ pub fn add(git_root: &Path, files: &[String], to: Option<&str>) -> anyhow::Resul
             );
         }
 
-        // Error if already in any gitlet
+        // Error only if the file is owned by a *different* gitlet.
+        // Re-adding to the same gitlet is how the user stages modifications.
         if let Some(owner) = find_owning_gitlet(git_root, &cfg, &rel)? {
-            return Err(anyhow!(
-                "{} is already tracked by gitlet '{}'",
-                rel.display(),
-                owner
-            ));
+            if owner != target {
+                return Err(anyhow!(
+                    "{} is already tracked by gitlet '{}'",
+                    rel.display(),
+                    owner
+                ));
+            }
         }
 
         // Stage in the target gitlet index.
@@ -176,6 +179,75 @@ pub fn remove(git_root: &Path, file: &str, to: Option<&str>) -> anyhow::Result<(
         target
     );
     Ok(())
+}
+
+pub fn commit(git_root: &Path, message: &str, to: Option<&str>) -> anyhow::Result<()> {
+    let git_root = git_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", git_root.display()))?;
+    let git_root = git_root.as_path();
+
+    let cfg = config::load(git_root)?;
+    let target = to.unwrap_or(&cfg.active).to_string();
+
+    let gitlet_dir = git_root.join(".gitlet").join(&target);
+    if !gitlet_dir.exists() {
+        return Err(anyhow!("gitlet '{}' does not exist.", target));
+    }
+
+    let repo = git2::Repository::open(&gitlet_dir)
+        .with_context(|| format!("failed to open gitlet repo at {}", gitlet_dir.display()))?;
+
+    // Build the tree from the current index
+    let mut index = repo.index().context("failed to get gitlet index")?;
+    let tree_id = index.write_tree().context("failed to write index tree")?;
+    let tree = repo.find_tree(tree_id).context("failed to find tree")?;
+
+    // Read author/committer from the outer git config, with fallbacks
+    let (author_name, author_email) = read_git_identity(git_root);
+    let sig = git2::Signature::now(&author_name, &author_email)
+        .context("failed to create git signature")?;
+
+    // Create root commit or chained commit depending on whether HEAD resolves
+    let oid = match repo.head() {
+        Ok(head) => {
+            let parent = head.peel_to_commit().context("failed to peel HEAD to commit")?;
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+                .context("failed to create commit")?
+        }
+        Err(_) => {
+            // HEAD doesn't exist yet — this is the first commit
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])
+                .context("failed to create root commit")?
+        }
+    };
+
+    let short_sha = &oid.to_string()[..7];
+    println!("[{}] {} {}", target, short_sha, message);
+    Ok(())
+}
+
+/// Read user.name and user.email from the outer git config, falling back to defaults.
+fn read_git_identity(git_root: &Path) -> (String, String) {
+    let name;
+    let email;
+
+    match git2::Repository::discover(git_root).and_then(|r| r.config()) {
+        Ok(cfg) => {
+            name = cfg
+                .get_string("user.name")
+                .unwrap_or_else(|_| "gitlet user".to_string());
+            email = cfg
+                .get_string("user.email")
+                .unwrap_or_else(|_| "gitlet@local".to_string());
+        }
+        Err(_) => {
+            name = "gitlet user".to_string();
+            email = "gitlet@local".to_string();
+        }
+    }
+
+    (name, email)
 }
 
 /// Build a repo-relative path from a raw file argument without requiring the file to exist.
