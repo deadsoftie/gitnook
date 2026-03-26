@@ -81,7 +81,7 @@ pub fn add(git_root: &Path, files: &[String], to: Option<&str>) -> anyhow::Resul
         // Warn if tracked by the outer git
         if is_tracked_by_outer_git(git_root, &rel)? {
             eprintln!(
-                "Warning: {} is tracked by git. To fully remove it run: git rm --cached {}",
+                "Warning: {} is currently tracked by git. Run: git rm --cached {}",
                 rel.display(),
                 rel.display()
             );
@@ -225,6 +225,111 @@ pub fn commit(git_root: &Path, message: &str, to: Option<&str>) -> anyhow::Resul
     let short_sha = &oid.to_string()[..7];
     println!("[{}] {} {}", target, short_sha, message);
     Ok(())
+}
+
+pub fn status(git_root: &Path, name: Option<&str>) -> anyhow::Result<()> {
+    let git_root = git_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", git_root.display()))?;
+    let git_root = git_root.as_path();
+
+    let cfg = match config::load(git_root) {
+        Ok(c) if !c.gitlets.is_empty() => c,
+        _ => {
+            println!("No gitlets found. Run 'gitlet init' to create one.");
+            return Ok(());
+        }
+    };
+
+    // Collect the names to display, sorted for deterministic output
+    let names: Vec<&str> = match name {
+        Some(n) => {
+            if !cfg.gitlets.contains_key(n) {
+                return Err(anyhow!("gitlet '{}' does not exist.", n));
+            }
+            vec![n]
+        }
+        None => {
+            let mut v: Vec<&str> = cfg.gitlets.keys().map(String::as_str).collect();
+            v.sort();
+            v
+        }
+    };
+
+    // Width of the widest name, for column alignment
+    let max_len = names.iter().map(|n| n.len()).max().unwrap_or(0);
+
+    for name in &names {
+        let label = format!("[{}]", name);
+        let padding = " ".repeat(max_len - name.len() + 2);
+        let summary = gitlet_status_summary(git_root, name)?;
+        println!("{}{}{}", label, padding, summary);
+    }
+
+    Ok(())
+}
+
+/// Compute a one-line status summary for a single gitlet.
+fn gitlet_status_summary(git_root: &Path, name: &str) -> anyhow::Result<String> {
+    let gitlet_dir = git_root.join(".gitlet").join(name);
+    let repo = git2::Repository::open(&gitlet_dir)
+        .with_context(|| format!("failed to open gitlet repo '{}'", name))?;
+    let index = repo.index().context("failed to read gitlet index")?;
+
+    // Resolve HEAD tree once; None means no commits yet
+    let head_tree = match repo.head() {
+        Ok(head) => Some(head.peel_to_tree().context("failed to peel HEAD to tree")?),
+        Err(_) => None,
+    };
+
+    let mut new_files: Vec<String> = Vec::new();
+    let mut modified_files: Vec<String> = Vec::new();
+
+    for i in 0..index.len() {
+        let entry = index.get(i).expect("index entry exists");
+        let path_str = String::from_utf8_lossy(&entry.path).into_owned();
+        let path = std::path::Path::new(&path_str);
+
+        match &head_tree {
+            // No commits yet — every indexed file is "new"
+            None => new_files.push(path_str),
+            Some(tree) => match tree.get_path(path) {
+                // Not in the last commit → new (staged but not committed)
+                Err(_) => new_files.push(path_str),
+                // In the last commit — compare committed blob with on-disk content
+                Ok(tree_entry) => {
+                    let abs = git_root.join(path);
+                    let on_disk = std::fs::read(&abs).unwrap_or_default();
+                    if let Ok(blob) = repo.find_blob(tree_entry.id()) {
+                        if blob.content() != on_disk.as_slice() {
+                            modified_files.push(path_str);
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    if new_files.is_empty() && modified_files.is_empty() {
+        return Ok("clean".to_string());
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if !new_files.is_empty() {
+        let label = if new_files.len() == 1 {
+            format!("1 new file: {}", new_files[0])
+        } else {
+            format!("{} new files: {}", new_files.len(), new_files.join(", "))
+        };
+        parts.push(label);
+    }
+
+    for f in &modified_files {
+        parts.push(format!("modified: {}", f));
+    }
+
+    Ok(parts.join(", "))
 }
 
 /// Read user.name and user.email from the outer git config, falling back to defaults.
