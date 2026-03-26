@@ -44,8 +44,8 @@ fn run() -> anyhow::Result<()> {
             gitlet::log(&git_root, name.as_deref())
         }
         Commands::List => {
-            println!("[list] not yet implemented");
-            Ok(())
+            let git_root = repo::find_git_root()?;
+            gitlet::list(&git_root)
         }
         Commands::Switch { .. } => {
             println!("[switch] not yet implemented");

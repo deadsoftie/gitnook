@@ -402,6 +402,59 @@ pub fn log(git_root: &Path, name: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn list(git_root: &Path) -> anyhow::Result<()> {
+    let git_root = git_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", git_root.display()))?;
+    let git_root = git_root.as_path();
+
+    let cfg = match config::load(git_root) {
+        Ok(c) if !c.gitlets.is_empty() => c,
+        _ => {
+            println!("No gitlets initialized in this repo. Run 'gitlet init'.");
+            return Ok(());
+        }
+    };
+
+    // Sort names for deterministic output
+    let mut names: Vec<&str> = cfg.gitlets.keys().map(String::as_str).collect();
+    names.sort();
+
+    let max_len = names.iter().map(|n| n.len()).max().unwrap_or(0);
+
+    for name in &names {
+        let is_active = *name == cfg.active;
+        let marker = if is_active { "*" } else { " " };
+        let active_label = if is_active { "(active)" } else { "        " };
+
+        // Count files tracked in this gitlet's index
+        let file_count = {
+            let gitlet_dir = git_root.join(".gitlet").join(name);
+            let repo = git2::Repository::open(&gitlet_dir)
+                .with_context(|| format!("failed to open gitlet repo '{}'", name))?;
+            repo.index()
+                .with_context(|| format!("failed to read index for gitlet '{}'", name))?
+                .len()
+        };
+
+        let file_label = if file_count == 1 {
+            "1 file tracked".to_string()
+        } else {
+            format!("{} files tracked", file_count)
+        };
+
+        // Pad name column to align active_label and file counts
+        let name_padding = " ".repeat(max_len - name.len() + 2);
+
+        println!(
+            "{} {}{}{}   {}",
+            marker, name, name_padding, active_label, file_label
+        );
+    }
+
+    Ok(())
+}
+
 /// Read user.name and user.email from the outer git config, falling back to defaults.
 fn read_git_identity(git_root: &Path) -> (String, String) {
     let name;
