@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
-use chrono::Utc;
+use chrono::{FixedOffset, TimeZone, Utc};
 
 use crate::config::{self, GitletConfig, GitletEntry};
 use crate::exclude;
@@ -330,6 +330,76 @@ fn gitlet_status_summary(git_root: &Path, name: &str) -> anyhow::Result<String> 
     }
 
     Ok(parts.join(", "))
+}
+
+pub fn log(git_root: &Path, name: Option<&str>) -> anyhow::Result<()> {
+    let git_root = git_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", git_root.display()))?;
+    let git_root = git_root.as_path();
+
+    let cfg = config::load(git_root)?;
+    let target = name.unwrap_or(&cfg.active);
+
+    if !cfg.gitlets.contains_key(target) {
+        return Err(anyhow!("gitlet '{}' does not exist.", target));
+    }
+
+    let gitlet_dir = git_root.join(".gitlet").join(target);
+    let repo = git2::Repository::open(&gitlet_dir)
+        .with_context(|| format!("failed to open gitlet repo '{}'", target))?;
+
+    // If HEAD doesn't resolve there are no commits yet
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(_) => {
+            println!("No commits yet in gitlet '{}'", target);
+            return Ok(());
+        }
+    };
+
+    let mut revwalk = repo.revwalk().context("failed to create revwalk")?;
+    revwalk
+        .push(head.peel_to_commit()?.id())
+        .context("failed to push HEAD onto revwalk")?;
+    revwalk
+        .set_sorting(git2::Sort::TIME)
+        .context("failed to set revwalk sort")?;
+
+    for oid in revwalk {
+        let oid = oid.context("failed to read commit oid")?;
+        let commit = repo
+            .find_commit(oid)
+            .with_context(|| format!("failed to find commit {}", oid))?;
+
+        let short_sha = &oid.to_string()[..7];
+
+        let author = commit.author();
+        let author_name = author.name().unwrap_or("unknown");
+        let author_email = author.email().unwrap_or("");
+
+        let time = commit.time();
+        let offset = FixedOffset::east_opt(time.offset_minutes() * 60)
+            .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+        let dt = offset
+            .timestamp_opt(time.seconds(), 0)
+            .single()
+            .context("invalid commit timestamp")?;
+        let date_str = dt.format("%a %b %e %H:%M:%S %Y").to_string();
+
+        let message = commit.message().unwrap_or("").trim_end();
+
+        println!("commit {}", short_sha);
+        println!("Author: {} <{}>", author_name, author_email);
+        println!("Date:   {}", date_str);
+        println!();
+        for line in message.lines() {
+            println!("    {}", line);
+        }
+        println!();
+    }
+
+    Ok(())
 }
 
 /// Read user.name and user.email from the outer git config, falling back to defaults.

@@ -39,9 +39,9 @@ fn run() -> anyhow::Result<()> {
             let git_root = repo::find_git_root()?;
             gitlet::status(&git_root, name.as_deref())
         }
-        Commands::Log { .. } => {
-            println!("[log] not yet implemented");
-            Ok(())
+        Commands::Log { name } => {
+            let git_root = repo::find_git_root()?;
+            gitlet::log(&git_root, name.as_deref())
         }
         Commands::List => {
             println!("[list] not yet implemented");
