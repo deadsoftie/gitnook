@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ pub struct GitletEntry {
     pub created: String,
 }
 
-fn config_path(root: &Path) -> std::path::PathBuf {
+fn config_path(root: &Path) -> PathBuf {
     root.join(".gitlet").join("config.toml")
 }
 

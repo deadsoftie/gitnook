@@ -16,7 +16,7 @@ pub fn init(git_root: &Path, name: &str) -> anyhow::Result<()> {
         ));
     }
 
-    // Create the bare git repo for this gitlet
+    // Create the bare git repo for this gitlet (.gitlet/ is created as a side-effect)
     std::fs::create_dir_all(&gitlet_dir)
         .with_context(|| format!("failed to create {}", gitlet_dir.display()))?;
     git2::Repository::init_bare(&gitlet_dir)
@@ -24,8 +24,6 @@ pub fn init(git_root: &Path, name: &str) -> anyhow::Result<()> {
 
     // Create or update .gitlet/config.toml
     let gitlet_root = git_root.join(".gitlet");
-    std::fs::create_dir_all(&gitlet_root)
-        .with_context(|| format!("failed to create {}", gitlet_root.display()))?;
 
     let mut cfg = if gitlet_root.join("config.toml").exists() {
         config::load(git_root)?
@@ -54,6 +52,13 @@ pub fn init(git_root: &Path, name: &str) -> anyhow::Result<()> {
 }
 
 pub fn add(git_root: &Path, files: &[String], to: Option<&str>) -> anyhow::Result<()> {
+    // Canonicalize git_root so strip_prefix works correctly on macOS where
+    // current_dir() may return a symlinked path (e.g. /var → /private/var).
+    let git_root = git_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", git_root.display()))?;
+    let git_root = git_root.as_path();
+
     let cfg = config::load(git_root)?;
     let target = to.unwrap_or(&cfg.active).to_string();
 
@@ -66,7 +71,8 @@ pub fn add(git_root: &Path, files: &[String], to: Option<&str>) -> anyhow::Resul
         .with_context(|| format!("failed to open gitlet repo at {}", gitlet_dir.display()))?;
 
     for file in files {
-        let abs = resolve_file(git_root, file)?;
+        // resolve_file canonicalizes; with git_root also canonical, strip_prefix is safe.
+        let abs = resolve_file(file)?;
         let rel = abs
             .strip_prefix(git_root)
             .with_context(|| format!("'{}' is outside the git repo", file))?
@@ -92,8 +98,7 @@ pub fn add(git_root: &Path, files: &[String], to: Option<&str>) -> anyhow::Resul
 
         // Stage in the target gitlet index.
         // Bare repos have no workdir, so we create a blob from the real file
-        // and add it to the index manually.
-        let abs = git_root.join(&rel);
+        // and add it to the index manually. Use the canonical abs path directly.
         let blob_id = repo
             .blob_path(&abs)
             .with_context(|| format!("failed to create blob for {}", abs.display()))?;
@@ -128,6 +133,12 @@ pub fn add(git_root: &Path, files: &[String], to: Option<&str>) -> anyhow::Resul
 }
 
 pub fn remove(git_root: &Path, file: &str, to: Option<&str>) -> anyhow::Result<()> {
+    // Canonicalize for consistency with `add` and correct strip_prefix on macOS.
+    let git_root = git_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", git_root.display()))?;
+    let git_root = git_root.as_path();
+
     let cfg = config::load(git_root)?;
     let target = to.unwrap_or(&cfg.active).to_string();
 
@@ -197,15 +208,16 @@ fn normalize_path(path: &Path) -> PathBuf {
     out
 }
 
-/// Resolve a file argument to an absolute path, erroring if it does not exist.
-fn resolve_file(_git_root: &Path, file: &str) -> anyhow::Result<PathBuf> {
+/// Resolve a file argument to a canonical absolute path, erroring if it does not exist.
+fn resolve_file(file: &str) -> anyhow::Result<PathBuf> {
     let p = PathBuf::from(file);
     let abs = if p.is_absolute() {
         p
     } else {
         std::env::current_dir()?.join(p)
     };
-    // Canonicalize resolves symlinks and `..` components
+    // canonicalize resolves symlinks and `..` so strip_prefix against a
+    // canonicalized git_root is always safe.
     abs.canonicalize()
         .with_context(|| format!("'{}' does not exist", file))
 }
@@ -229,12 +241,13 @@ fn find_owning_gitlet(
         if !gitlet_dir.exists() {
             continue;
         }
-        if let Ok(repo) = git2::Repository::open(&gitlet_dir) {
-            if let Ok(index) = repo.index() {
-                if index.get_path(rel, 0).is_some() {
-                    return Ok(Some(name.clone()));
-                }
-            }
+        let repo = git2::Repository::open(&gitlet_dir)
+            .with_context(|| format!("failed to open gitlet repo '{}'", name))?;
+        let index = repo
+            .index()
+            .with_context(|| format!("failed to read index for gitlet '{}'", name))?;
+        if index.get_path(rel, 0).is_some() {
+            return Ok(Some(name.clone()));
         }
     }
     Ok(None)

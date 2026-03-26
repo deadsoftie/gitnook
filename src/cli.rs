@@ -17,6 +17,7 @@ pub enum Commands {
     /// Stage one or more files in a gitlet
     Add {
         /// Files to stage
+        #[arg(required = true)]
         files: Vec<String>,
         /// Target gitlet (overrides active)
         #[arg(long)]
