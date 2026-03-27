@@ -1,0 +1,374 @@
+use super::*;
+use std::fs;
+use tempfile::TempDir;
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+/// Create a temp dir with a real outer git repo inside it.
+/// Returns (TempDir, canonical_root).  TempDir must be kept alive.
+fn setup() -> (TempDir, PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    (tmp, root)
+}
+
+/// Write a file at `<root>/<name>` and return its absolute path as a String.
+fn make_file(root: &Path, name: &str, content: &str) -> String {
+    let path = root.join(name);
+    fs::write(&path, content).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// Return the number of entries in a gitlet's index.
+fn index_len(root: &Path, name: &str) -> usize {
+    let repo = git2::Repository::open(root.join(".gitlet").join(name)).unwrap();
+    repo.index().unwrap().len()
+}
+
+/// Return true if the gitlet's index contains an entry with the given relative path.
+fn index_has(root: &Path, gitlet: &str, rel: &str) -> bool {
+    let repo = git2::Repository::open(root.join(".gitlet").join(gitlet)).unwrap();
+    let index = repo.index().unwrap();
+    index.get_path(Path::new(rel), 0).is_some()
+}
+
+// ── normalize_path ─────────────────────────────────────────────────────────
+
+#[test]
+fn normalize_strips_cur_dir() {
+    let p = PathBuf::from("/a/./b/./c");
+    assert_eq!(normalize_path(&p), PathBuf::from("/a/b/c"));
+}
+
+#[test]
+fn normalize_resolves_parent_dir() {
+    let p = PathBuf::from("/a/b/../c");
+    assert_eq!(normalize_path(&p), PathBuf::from("/a/c"));
+}
+
+#[test]
+fn normalize_handles_nested_parent() {
+    let p = PathBuf::from("/a/b/c/../../d");
+    assert_eq!(normalize_path(&p), PathBuf::from("/a/d"));
+}
+
+#[test]
+fn normalize_identity_on_clean_path() {
+    let p = PathBuf::from("/a/b/c");
+    assert_eq!(normalize_path(&p), PathBuf::from("/a/b/c"));
+}
+
+// ── init ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn init_creates_bare_repo_directory() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    assert!(root.join(".gitlet/default/HEAD").exists());
+}
+
+#[test]
+fn init_creates_config_with_active() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let cfg = crate::config::load(&root).unwrap();
+    assert_eq!(cfg.active, "default");
+    assert!(cfg.gitlets.contains_key("default"));
+}
+
+#[test]
+fn init_first_gitlet_becomes_active() {
+    let (_tmp, root) = setup();
+    init(&root, "first").unwrap();
+    init(&root, "second").unwrap();
+    let cfg = crate::config::load(&root).unwrap();
+    assert_eq!(cfg.active, "first");
+}
+
+#[test]
+fn init_adds_gitlet_dir_to_exclude() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    assert!(crate::exclude::has_exclusion(&root, ".gitlet/").unwrap());
+}
+
+#[test]
+fn init_duplicate_name_errors() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let err = init(&root, "default").unwrap_err();
+    assert!(err.to_string().contains("already exists"));
+}
+
+#[test]
+fn init_multiple_names_all_registered_in_config() {
+    let (_tmp, root) = setup();
+    init(&root, "alpha").unwrap();
+    init(&root, "beta").unwrap();
+    let cfg = crate::config::load(&root).unwrap();
+    assert!(cfg.gitlets.contains_key("alpha"));
+    assert!(cfg.gitlets.contains_key("beta"));
+}
+
+// ── add ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn add_stages_file_in_gitlet_index() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file], None).unwrap();
+    assert!(index_has(&root, "default", "notes.md"));
+}
+
+#[test]
+fn add_writes_path_to_exclude() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file], None).unwrap();
+    assert!(crate::exclude::has_exclusion(&root, "notes.md").unwrap());
+}
+
+#[test]
+fn add_multiple_files_in_one_call() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let f1 = make_file(&root, "a.md", "a");
+    let f2 = make_file(&root, "b.md", "b");
+    add(&root, &[f1, f2], None).unwrap();
+    assert_eq!(index_len(&root, "default"), 2);
+}
+
+#[test]
+fn add_to_named_gitlet_via_to_flag() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    init(&root, "secrets").unwrap();
+    let file = make_file(&root, ".env", "pw=x");
+    add(&root, &[file], Some("secrets")).unwrap();
+    assert!(index_has(&root, "secrets", ".env"));
+    assert_eq!(index_len(&root, "default"), 0);
+}
+
+#[test]
+fn add_cross_gitlet_errors() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    init(&root, "other").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file.clone()], Some("default")).unwrap();
+    let err = add(&root, &[file], Some("other")).unwrap_err();
+    assert!(err.to_string().contains("already tracked by gitlet"));
+}
+
+#[test]
+fn add_restage_same_gitlet_updates_index() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "v1");
+    add(&root, &[file.clone()], None).unwrap();
+    fs::write(&file, "v2").unwrap();
+    // Re-adding to same gitlet stages the modification — should not error
+    add(&root, &[file], None).unwrap();
+    assert_eq!(index_len(&root, "default"), 1);
+}
+
+#[test]
+fn add_nonexistent_file_errors() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let bad = root.join("ghost.md").to_string_lossy().into_owned();
+    let err = add(&root, &[bad], None).unwrap_err();
+    assert!(err.to_string().contains("does not exist"));
+}
+
+// ── remove ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn remove_clears_index_entry() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file.clone()], None).unwrap();
+    remove(&root, &file, None).unwrap();
+    assert!(!index_has(&root, "default", "notes.md"));
+}
+
+#[test]
+fn remove_clears_exclude_entry() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file.clone()], None).unwrap();
+    remove(&root, &file, None).unwrap();
+    assert!(!crate::exclude::has_exclusion(&root, "notes.md").unwrap());
+}
+
+#[test]
+fn remove_untracked_file_errors() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    let err = remove(&root, &file, None).unwrap_err();
+    assert!(err.to_string().contains("not tracked"));
+}
+
+#[test]
+fn remove_wrong_gitlet_errors() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    init(&root, "other").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file.clone()], Some("default")).unwrap();
+    // Trying to remove from "other" when it belongs to "default"
+    let err = remove(&root, &file, Some("other")).unwrap_err();
+    assert!(err.to_string().contains("not tracked"));
+}
+
+// ── commit ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn commit_creates_root_commit() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file], None).unwrap();
+    commit(&root, "initial", None).unwrap();
+
+    let repo = git2::Repository::open(root.join(".gitlet/default")).unwrap();
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head_commit.message().unwrap(), "initial");
+    assert_eq!(head_commit.parent_count(), 0);
+}
+
+#[test]
+fn commit_chains_parent() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "v1");
+    add(&root, &[file.clone()], None).unwrap();
+    commit(&root, "first", None).unwrap();
+    fs::write(&file, "v2").unwrap();
+    add(&root, &[file], None).unwrap();
+    commit(&root, "second", None).unwrap();
+
+    let repo = git2::Repository::open(root.join(".gitlet/default")).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.message().unwrap(), "second");
+    assert_eq!(head.parent_count(), 1);
+    assert_eq!(head.parent(0).unwrap().message().unwrap(), "first");
+}
+
+#[test]
+fn commit_uses_identity_fallback() {
+    // Repo with no user.name/email configured — should use fallback and not error
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file], None).unwrap();
+    commit(&root, "test commit", None).unwrap();
+
+    let repo = git2::Repository::open(root.join(".gitlet/default")).unwrap();
+    let c = repo.head().unwrap().peel_to_commit().unwrap();
+    // Either real config or the fallback values — just must not be empty
+    assert!(!c.author().name().unwrap_or("").is_empty());
+}
+
+// ── status ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn status_new_file_before_commit() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file], None).unwrap();
+    let summary = gitlet_status_summary(&root, "default").unwrap();
+    assert!(summary.contains("new file"));
+}
+
+#[test]
+fn status_clean_after_commit() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file], None).unwrap();
+    commit(&root, "init", None).unwrap();
+    let summary = gitlet_status_summary(&root, "default").unwrap();
+    assert_eq!(summary, "clean");
+}
+
+#[test]
+fn status_modified_after_disk_change() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let path = root.join("notes.md");
+    fs::write(&path, "v1").unwrap();
+    add(&root, &[path.to_string_lossy().into_owned()], None).unwrap();
+    commit(&root, "init", None).unwrap();
+
+    fs::write(&path, "v2").unwrap();
+    let summary = gitlet_status_summary(&root, "default").unwrap();
+    assert!(summary.contains("modified"));
+}
+
+#[test]
+fn status_no_gitlets_prints_message() {
+    let (_tmp, root) = setup();
+    status(&root, None).unwrap();
+}
+
+#[test]
+fn status_unknown_name_errors() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let err = status(&root, Some("nonexistent")).unwrap_err();
+    assert!(err.to_string().contains("does not exist"));
+}
+
+// ── log ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn log_empty_gitlet_returns_ok() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    log(&root, None).unwrap();
+}
+
+#[test]
+fn log_after_commits_returns_ok() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let file = make_file(&root, "notes.md", "hello");
+    add(&root, &[file], None).unwrap();
+    commit(&root, "first commit", None).unwrap();
+    log(&root, None).unwrap();
+}
+
+#[test]
+fn log_unknown_name_errors() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let err = log(&root, Some("ghost")).unwrap_err();
+    assert!(err.to_string().contains("does not exist"));
+}
+
+// ── list ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn list_no_gitlets_returns_ok() {
+    let (_tmp, root) = setup();
+    list(&root).unwrap();
+}
+
+#[test]
+fn list_shows_correct_file_counts() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let f1 = make_file(&root, "a.md", "a");
+    let f2 = make_file(&root, "b.md", "b");
+    add(&root, &[f1, f2], None).unwrap();
+    assert_eq!(index_len(&root, "default"), 2);
+    list(&root).unwrap();
+}

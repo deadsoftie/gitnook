@@ -552,3 +552,8 @@ fn find_owning_gitlet(
     }
     Ok(None)
 }
+
+#[cfg(test)]
+#[path = "tests/gitlet_tests.rs"]
+mod tests;
+
