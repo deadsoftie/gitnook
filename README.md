@@ -22,6 +22,9 @@ cargo build --release
 
 # to install it globally so you can run gitlet from anywhere
 cargo install --path .
+
+# verify the install
+gitlet --version
 ```
 
 Requires Rust 1.82 or later.
