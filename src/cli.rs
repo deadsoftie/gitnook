@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "gitlet", about = "Lightweight local git contexts inside a repo")]
+#[command(name = "gitlet", about = "Lightweight local git contexts inside a repo", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
