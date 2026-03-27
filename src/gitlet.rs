@@ -553,6 +553,21 @@ fn find_owning_gitlet(
     Ok(None)
 }
 
+pub fn switch(git_root: &Path, name: &str) -> anyhow::Result<()> {
+    let cfg = config::load(git_root)?;
+
+    if !cfg.gitlets.contains_key(name) {
+        return Err(anyhow!(
+            "gitlet '{}' does not exist. Run 'gitlet list' to see all gitlets.",
+            name
+        ));
+    }
+
+    config::set_active(git_root, name)?;
+    println!("Switched active gitlet to '{}'", name);
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "tests/gitlet_tests.rs"]
 mod tests;

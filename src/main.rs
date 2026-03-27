@@ -47,9 +47,9 @@ fn run() -> anyhow::Result<()> {
             let git_root = repo::find_git_root()?;
             gitlet::list(&git_root)
         }
-        Commands::Switch { .. } => {
-            println!("[switch] not yet implemented");
-            Ok(())
+        Commands::Switch { name } => {
+            let git_root = repo::find_git_root()?;
+            gitlet::switch(&git_root, &name)
         }
     }
 }

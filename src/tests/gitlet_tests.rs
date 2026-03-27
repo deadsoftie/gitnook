@@ -372,3 +372,37 @@ fn list_shows_correct_file_counts() {
     assert_eq!(index_len(&root, "default"), 2);
     list(&root).unwrap();
 }
+
+// ── switch ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn switch_changes_active_gitlet() {
+    let (_tmp, root) = setup();
+    init(&root, "first").unwrap();
+    init(&root, "second").unwrap();
+    let cfg = crate::config::load(&root).unwrap();
+    assert_eq!(cfg.active, "first");
+
+    switch(&root, "second").unwrap();
+    let cfg = crate::config::load(&root).unwrap();
+    assert_eq!(cfg.active, "second");
+}
+
+#[test]
+fn switch_unknown_name_errors() {
+    let (_tmp, root) = setup();
+    init(&root, "default").unwrap();
+    let err = switch(&root, "nonexistent").unwrap_err();
+    assert!(err.to_string().contains("does not exist"));
+}
+
+#[test]
+fn switch_reflected_in_list() {
+    let (_tmp, root) = setup();
+    init(&root, "alpha").unwrap();
+    init(&root, "beta").unwrap();
+    switch(&root, "beta").unwrap();
+    let cfg = crate::config::load(&root).unwrap();
+    assert_eq!(cfg.active, "beta");
+    list(&root).unwrap();
+}
