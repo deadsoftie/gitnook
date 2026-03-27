@@ -1,135 +1,123 @@
 # gitlet
 
-> Lightweight local version control contexts inside any Git repo.
+`gitlet` gives you lightweight, local-only version control contexts inside any existing git repo. Files you add to a gitlet get their own independent commit history, are automatically excluded from the outer repo, and never get pushed to your team's remote. Your `.gitignore` stays clean.
 
-Gitlet lets you track files privately inside an existing Git repository. Files you add to a gitlet get their own commit history and are automatically excluded from the outer repo - your team never sees them, they never get pushed, and your `.gitignore` stays clean.
-
----
-
-## The Problem
-
-You're working inside a project repo and you want to version some files locally - personal notes, a scratch config, a `.env` file. Your options today are awkward:
-
-- Add them to `.gitignore` - they're excluded but unversioned
-- Commit them to the repo - now they're everyone's problem
-- Create a separate repo somewhere else - now you're context-switching to track files that live _here_
-
-Gitlet is the missing option: version those files right where they live, privately, without touching the outer repo.
-
----
-
-## How It Works
-
-Running `gitlet init` creates a `.gitlet/` directory at your repo root (automatically excluded from the outer git via `.git/info/exclude`). Each named gitlet inside it is a lightweight bare git repo with its own object store and commit history.
-
-When you run `gitlet add notes.md`, two things happen:
-
-1. `notes.md` is staged in your active gitlet
-2. `notes.md` is added to `.git/info/exclude` so the outer git ignores it permanently
-
-Your project's `.gitignore` is never touched.
+**Use cases:** personal notes inside a project, local config overrides, secrets and credentials that must never leave your machine.
 
 ---
 
 ## Install
 
-```bash
+```sh
 cargo install gitlet
 ```
 
-> Gitlet is currently in development. The binary is not yet published to crates.io. To build from source:
->
-> ```bash
-> git clone https://github.com/your-username/gitlet
-> cd gitlet
-> cargo build --release
-> # binary is at target/release/gitlet
-> ```
+To build from source:
+
+```sh
+git clone https://github.com/deadsoftie/gitlet
+cd gitlet
+cargo build --release
+# binary is at target/release/gitlet
+```
+
+Requires Rust 1.82 or later.
 
 ---
 
 ## Quick Start
 
-```bash
-# Initialize a gitlet inside your existing repo
-gitlet init
+```sh
+# 1. Initialise a gitlet inside any existing git repo
+gitlet init secrets
 
-# Start tracking a file
-gitlet add notes.md
+# 2. Track a file — it is immediately excluded from outer git
+gitlet add .env.local --to secrets
 
-# Commit it
-gitlet commit -m "initial notes"
+# 3. Commit a snapshot
+gitlet commit -m "add local db credentials" --to secrets
 
-# Check status across all gitlets
-gitlet status
+# 4. See what has changed
+gitlet status secrets
+
+# 5. Inspect history
+gitlet log secrets
 ```
 
----
+Working with multiple gitlets and the active default:
 
-## Multiple Gitlets
+```sh
+gitlet init notes
+gitlet switch notes        # notes is now the active gitlet
 
-You can have more than one gitlet per repo, each tracking different files independently:
-
-```bash
-gitlet init secrets
-gitlet init scratch
-
-gitlet add .env.local --to secrets
-gitlet add todo.md --to scratch
+gitlet add TODO.md         # --to is optional when targeting the active gitlet
+gitlet commit -m "draft roadmap"
 
 gitlet list
-# * secrets   (active)   1 file tracked
-#   scratch              1 file tracked
+# * notes      (active)   1 file tracked
+#   secrets               1 file tracked
 ```
 
 ---
 
-## Commands
+## Command Reference
 
-| Command                                | Description                                          |
-| -------------------------------------- | ---------------------------------------------------- |
-| `gitlet init [name]`                   | Create a new gitlet (default name: `default`)        |
-| `gitlet add <files> [--to <name>]`     | Track files in the active or named gitlet            |
-| `gitlet remove <file> [--to <name>]`   | Untrack a file and return it to outer git visibility |
-| `gitlet commit -m <msg> [--to <name>]` | Commit staged changes                                |
-| `gitlet status [name]`                 | Show status across all gitlets, or a specific one    |
-| `gitlet log [name]`                    | Show commit history for a gitlet                     |
-| `gitlet list`                          | List all gitlets in the current repo                 |
-| `gitlet switch <name>`                 | Change the active gitlet                             |
+| Command                                | Description                                             |
+| -------------------------------------- | ------------------------------------------------------- |
+| `gitlet init [name]`                   | Create a new gitlet (default name: `default`)           |
+| `gitlet add <files>... [--to <name>]`  | Stage files in a gitlet and exclude them from outer git |
+| `gitlet remove <file> [--to <name>]`   | Untrack a file and restore it to outer git visibility   |
+| `gitlet commit -m <msg> [--to <name>]` | Commit staged changes in a gitlet                       |
+| `gitlet status [name]`                 | Show working-directory status for all gitlets or one    |
+| `gitlet log [name]`                    | Show commit history for a gitlet                        |
+| `gitlet list`                          | List all gitlets with file counts and active marker     |
+| `gitlet switch <name>`                 | Change the active gitlet                                |
+
+All commands that target a specific gitlet accept `--to <name>` to override the active gitlet without changing the global config.
 
 ---
 
-## Design Principles
+## How It Works
 
-- **Never touches `.gitignore`** - exclusions go to `.git/info/exclude`, which is local-only and never committed
-- **Fully local by default** - nothing gets pushed anywhere unless you explicitly choose to
-- **One file, one gitlet** - a file can only be tracked by one gitlet at a time, preventing conflicts
-- **Zero outer repo pollution** - the outer git remains completely unaware of gitlet and its files
+On `gitlet init`, gitlet creates `.gitlet/<name>/` — a bare git repository managed via [libgit2](https://libgit2.org). It also adds `.gitlet/` to `.git/info/exclude` so the outer repo never sees the gitlet directory.
+
+When you `gitlet add` a file, two things happen:
+
+1. The file is staged in the target gitlet's bare repo index.
+2. The file's path is appended to `.git/info/exclude` — the outer git now ignores it completely.
+
+`gitlet remove` reverses both operations. Your project's `.gitignore` is never modified.
+
+```
+my-project/
+├── .git/
+│   └── info/
+│       └── exclude        ← gitlet writes exclusions here, never .gitignore
+├── .gitlet/
+│   ├── config.toml        ← active gitlet + registry of all gitlets
+│   └── secrets/           ← bare git repo: objects, HEAD, refs
+├── .env.local             ← excluded from outer git, versioned by "secrets"
+└── src/
+```
+
+Each gitlet is a fully valid bare git repository. Commits, blobs, and trees are stored in `.gitlet/<name>/objects/` using standard git object format.
 
 ---
 
 ## Limitations
 
-- **Local only.** Gitlets exist only on your machine. There is no push, pull, or remote support in v1.
-- **No branching.** Each gitlet has a single `main` branch. Branching within a gitlet is not yet supported.
-- **No diff.** There is no `gitlet diff` command in v1. Use `gitlet log` to inspect history.
-- **No destroy.** Deleting a gitlet is not yet supported. Files remain excluded from the outer git until manually cleaned from `.git/info/exclude`.
-- **One file, one gitlet.** A file cannot be shared between gitlets.
+- **Local only.** Gitlets are never pushed. There is no remote, clone, or collaboration support in v1.
+- **No branching.** Each gitlet has a single linear history. Branch management is not yet supported.
+- **No diff command.** Use `gitlet log` to inspect history; working-tree diffs are not yet exposed.
+- **No destroy command.** To remove a gitlet manually: delete `.gitlet/<name>/`, remove its entry from `.gitlet/config.toml`, and clean its paths from `.git/info/exclude`.
+- **One file, one gitlet.** A file can only belong to one gitlet at a time.
 
 ---
 
 ## Roadmap
 
-- **Remote push** — push a gitlet as a git remote or submodule so it can be backed up or shared selectively
-- **Branching** — create and switch branches within a gitlet
-- **Diff** — `gitlet diff` to compare working tree against the last commit
-- **Destroy** — `gitlet destroy <name>` to remove a gitlet and clean up its exclusions
-- **Shell completions** — tab completion for all commands and gitlet names
-
----
-
-## Built With
-
-- [Rust](https://www.rust-lang.org/)
-- [clap](https://docs.rs/clap) - CLI argument parsing
-- [git2](https://docs.rs/git2) - Git operations via libgit2
+- `gitlet push` — push a gitlet as a git bundle or bare remote for backup or selective sharing
+- `gitlet branch` / `gitlet checkout` — branching within a gitlet
+- `gitlet diff` — show working-tree diff against the last gitlet commit
+- `gitlet destroy <name>` — safely remove a gitlet and clean up all its exclusions
+- Shell completions for all commands and gitlet names
