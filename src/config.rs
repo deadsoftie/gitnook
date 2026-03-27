@@ -25,7 +25,7 @@ pub fn load(root: &Path) -> anyhow::Result<GitletConfig> {
     let path = config_path(root);
     if !path.exists() {
         return Err(anyhow!(
-            "No gitlets found. Run 'gitlet init' to create one."
+            "No gitlets found. Run 'gitlet init' first."
         ));
     }
     let contents = std::fs::read_to_string(&path)

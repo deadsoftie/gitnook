@@ -286,7 +286,10 @@ fn gitlet_status_summary(git_root: &Path, name: &str) -> anyhow::Result<String> 
     let mut modified_files: Vec<String> = Vec::new();
 
     for i in 0..index.len() {
-        let entry = index.get(i).expect("index entry exists");
+        let entry = match index.get(i) {
+            Some(e) => e,
+            None => continue,
+        };
         let path_str = String::from_utf8_lossy(&entry.path).into_owned();
         let path = std::path::Path::new(&path_str);
 
@@ -379,8 +382,9 @@ pub fn log(git_root: &Path, name: Option<&str>) -> anyhow::Result<()> {
         let author_email = author.email().unwrap_or("");
 
         let time = commit.time();
-        let offset = FixedOffset::east_opt(time.offset_minutes() * 60)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+        // east_opt(0) is always Some — 0 is always a valid UTC offset
+        let utc = FixedOffset::east_opt(0).expect("UTC offset 0 is always valid");
+        let offset = FixedOffset::east_opt(time.offset_minutes() * 60).unwrap_or(utc);
         let dt = offset
             .timestamp_opt(time.seconds(), 0)
             .single()
